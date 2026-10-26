@@ -1,0 +1,48 @@
+# Casdoor 服务器部署文件（只运行 casdoor 一个容器，MySQL 8 / Redis 用宿主机上的）
+# 用法：cp .env.example .env && 修改 .env && docker compose pull && docker compose up -d
+#
+# 宿主机 MySQL 8 需要提前准备：
+#   1. 建库（utf8mb4）：
+#        CREATE DATABASE casdoor DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+#   2. 建专用账号，来源限定为 Docker 网段（默认网桥 172.17.0.0/16，compose 自建网络一般也在 172.x）：
+#        CREATE USER 'casdoor'@'172.%' IDENTIFIED BY '强密码';
+#        GRANT ALL PRIVILEGES ON casdoor.* TO 'casdoor'@'172.%';
+#   3. my.cnf 的 bind-address 不能只是 127.0.0.1，要能被 Docker 网桥访问
+#      （如 bind-address = 0.0.0.0，或 MySQL 8.0.13+ 写多个：127.0.0.1,172.17.0.1）。
+#   4. 防火墙只放行本机和 Docker 网段访问 3306，不要对公网开放。Redis 的 6379 同理
+#      （redis.conf 的 bind / protected-mode 也要允许 Docker 网段）。
+
+services:
+  casdoor:
+    image: ghcr.io/codecodify/casdoor:${CASDOOR_TAG:-v4.24.0-codecodify.1}
+    container_name: casdoor
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口（容器内固定 8000）。
+      # 前面有 Nginx/Caddy 反向代理时，建议只绑本机：
+      #   - "127.0.0.1:${CASDOOR_HTTP_PORT:-8000}:8000"
+      - "${CASDOOR_HTTP_PORT:-8000}:8000"
+    extra_hosts:
+      # Linux 上让容器能用 host.docker.internal 访问宿主机
+      - "host.docker.internal:host-gateway"
+    environment:
+      # 以下变量名与 conf/app.conf 的配置项同名，Casdoor 优先读取环境变量（conf/conf.go GetConfigString）
+      driverName: mysql
+      # 末尾必须是 "/"，Casdoor 会在后面拼上 dbName
+      dataSourceName: "${DB_USER}:${DB_PASSWORD}@tcp(host.docker.internal:${DB_PORT:-3306})/"
+      dbName: "${DB_NAME:-casdoor}"
+      # 格式 host:port[,poolSize[,password[,db]]]，留空则不用 Redis
+      redisEndpoint: "${REDIS_ENDPOINT:-}"
+      # 对外访问地址，影响 OIDC issuer、回调地址、CORS
+      origin: "${CASDOOR_ORIGIN}"
+      # Casdoor 业务里的运行模式（支付回调等），生产用 prod
+      runmode: "${CASDOOR_RUNMODE:-prod}"
+      # 仅首次建库时生效：built-in/admin 的初始密码；不填则需要在网页上设置
+      initAdminPassword: "${CASDOOR_INIT_ADMIN_PASSWORD:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # 保留日志（容器内 /logs/casdoor.log）
+      - casdoor-logs:/logs
+
+volumes:
+  casdoor-logs:
